@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Z-TEAM</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #000; width: 100vw; height: 100vh;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      font-family: 'Press Start 2P', monospace; overflow: hidden;
+    }
+    body::after {
+      content: ''; position: fixed; inset: 0;
+      background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.25) 2px, rgba(0,0,0,0.25) 4px);
+      pointer-events: none; z-index: 100;
+    }
+    #title {
+      font-size: clamp(72px, 16vw, 130px);
+      color: #883232; letter-spacing: clamp(8px, 2vw, 20px);
+      text-shadow: 3px 3px 0 #3d0000, -1px -1px 0 #5a1a1a, 2px 0 0 #3d0000;
+      margin-bottom: 12px;
+    }
+    #subtitle { color: #7869c4; font-size: 9px; letter-spacing: 6px; margin-bottom: 52px; }
+    #author   { color: #7869c4; font-size: 8px; letter-spacing: 3px; margin-bottom: 48px; }
+    #menu { display: flex; flex-direction: column; gap: 16px; align-items: center; }
+    .menu-btn {
+      width: 280px; height: 52px; font-family: 'Press Start 2P', monospace;
+      font-size: 11px; letter-spacing: 2px; cursor: pointer;
+      border: 2px solid; background: transparent;
+      transition: background 0.08s; text-decoration: none;
+      display: flex; align-items: center; justify-content: center;
+    }
+    #create-btn { color: #fff; border-color: #fff; }
+    #create-btn:hover { background: #883232; border-color: #883232; color: #fff; }
+    #join-btn-link { color: #7869c4; border-color: #7869c4; }
+    #join-btn-link:hover { background: rgba(120,105,196,0.2); color: #fff; border-color: #fff; }
+    #insert-coin { color: #7869c4; font-size: 8px; letter-spacing: 4px; margin-top: 40px; animation: blink 1.2s step-end infinite; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+    #version { position: fixed; bottom: 10px; right: 14px; font-size: 6px; color: #1a1a3a; letter-spacing: 2px; }
+  </style>
+</head>
+<body>
+  <div id="title">Z-TEAM</div>
+  <div id="subtitle">ZOMBIE WAVE SURVIVAL</div>
+  <div id="author">WRITTEN BY MICAJAH NORDYKE</div>
+  <div id="menu">
+    <a id="create-btn" class="menu-btn" href="/game.html?create=1">CREATE GAME</a>
+    <a id="join-btn-link" class="menu-btn" href="/game.html">JOIN GAME</a>
+  </div>
+  <div id="insert-coin">— PRESS START —</div>
+  <div id="version">Z-TEAM · PC EDITION</div>
+</body>
+</html>

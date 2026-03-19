@@ -1,0 +1,26 @@
+# fly.toml — Z-TEAM Fly.io config
+app = "z-team"
+primary_region = "lax"  # US West — change to "iad" East, "lhr" London, "nrt" Tokyo etc.
+
+[build]
+
+[env]
+  NODE_ENV = "production"
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false   # CRITICAL — keeps server alive, no spin-down
+  auto_start_machines = true
+  min_machines_running = 1     # always at least 1 machine running
+
+  [http_service.concurrency]
+    type = "connections"
+    hard_limit = 500
+    soft_limit = 400
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
