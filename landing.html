@@ -1,0 +1,521 @@
+# Z-TEAM PC EDITION — IMPLEMENTATION PROMPT
+# Use this prompt with Claude to build game.html
+
+---
+
+## CONTEXT
+
+You are building `game.html` for Z-TEAM PC Edition — a top-down zombie wave survival game
+for 1-4 players online. The server (`server.js`) is already complete. You need to build
+the single-page game client that handles:
+
+1. Lobby (create room / join room with shareable invite link)
+2. Waiting room (see who's joined, ready up)
+3. Gameplay (render game state, send inputs)
+4. Voice chat (WebRTC peer-to-peer, mute button)
+5. Game over / restart
+
+---
+
+## TECH STACK
+
+- Socket.io client (loaded from `/socket.io/socket.io.js`)
+- Game constants loaded from `/shared/game-constants.js` → exposed as `window.GAME_CONSTANTS`
+- Canvas 2D rendering — 1334×750 game world, scaled to fit browser window
+- WebRTC for voice chat (peer-to-peer, server only relays signaling)
+- Press Start 2P font from Google Fonts
+- NO frameworks — vanilla JS only
+
+---
+
+## VISUAL STYLE — C64 PIXEL AESTHETIC
+
+- Background: `#000000` black
+- Grid lines: `rgba(120,105,196,0.03)` every 60px
+- Border: `#40318d` 2px
+- Font: Press Start 2P throughout
+- NO shadowBlur, NO glow effects, NO arcs for bullets — FLAT PIXEL SQUARES ONLY
+- Color palette: `#883232` red, `#7869c4` purple, `#55a049` green, `#bfce72` yellow-green
+  `#40318d` dark purple, `#6fcfcf` cyan, `#8b3f96` magenta
+
+---
+
+## SCREENS (show/hide via display style)
+
+### 1. LOBBY SCREEN (`#lobby-screen`)
+- Z-TEAM title in `#883232`, same C64 style as landing page
+- "WRITTEN BY MICAJAH NORDYKE" in `#7869c4`
+- Room code input (4 letters, auto-uppercase) + JOIN button
+- OR auto-create if URL has `?create=1`
+- If URL has `?room=XXXX` → auto-fill code and join
+
+### 2. WAITING ROOM SCREEN (`#waiting-screen`)
+- Shows room code prominently: "ROOM: XXXX"
+- INVITE LINK button — copies `window.location.origin + '/game.html?room=XXXX'` to clipboard
+  and shows "LINK COPIED!" feedback
+- Shows 4 player slots (P1/P2/P3/P4), highlight filled slots with player color
+- READY UP button → turns green when clicked, sends `player-ready` event
+- Countdown display when all players ready
+- MIC button in corner — requests mic, shows MIC ON / MUTED status
+
+### 3. GAME SCREEN (`#game-screen`)
+- Canvas fills available space, scaled maintaining 1334×750 aspect ratio
+- HUD overlay (position: absolute over canvas):
+  - Top left: WAVE number, zombie count
+  - Each player: colored square, name, HP bar, ammo, weapon, points
+  - Bottom center: controls hint (WASD=move, MOUSE=aim, CLICK=fire, E/CLICK=knife when out)
+- MIC button bottom right: round, shows speaking indicator (pulsing border when talking)
+
+### 4. GAME OVER SCREEN (`#gameover-screen`)
+- "GAME OVER" in large `#883232`
+- "WAVE XX SURVIVED"
+- RESTART button → sends `restart-vote`, shows "VOTED (X/Y)"
+
+---
+
+## SOCKET EVENTS
+
+### EMIT (client → server):
+```javascript
+socket.emit('create-room')
+// → server responds: 'room-created' { roomCode }
+
+socket.emit('join-room', { roomCode, fingerprint })
+// → server responds: 'join-success' { roomCode, slotNumber, color }
+//                 or: 'join-failed' { reason }
+
+socket.emit('player-ready', { roomCode })
+// → server responds: 'ready-update' { readyCount, total }
+
+socket.emit('pc-input', { roomCode, input: {
+  moveX,    // -1, 0, or 1
+  moveY,    // -1, 0, or 1
+  aimAngle, // Math.atan2(mouse.y - player.y, mouse.x - player.x)
+  fire,     // boolean — true when left mouse held AND ammo > 0
+}})
+
+socket.emit('pc-melee', { roomCode })
+// send when left mouse clicked AND ammo === 0
+
+socket.emit('mystery-box-purchase', { roomCode })
+socket.emit('vending-purchase', { roomCode })
+socket.emit('restart-vote', { roomCode })
+
+// WebRTC signaling:
+socket.emit('rtc-offer',    { roomCode, to, from, offer })
+socket.emit('rtc-answer',   { roomCode, to, from, answer })
+socket.emit('rtc-ice',      { roomCode, to, from, candidate })
+```
+
+### LISTEN (server → client):
+```javascript
+socket.on('room-created',         ({ roomCode }) => { ... })
+socket.on('join-success',         ({ roomCode, slotNumber, color }) => { ... })
+socket.on('join-failed',          ({ reason }) => { ... })
+socket.on('lobby-update',         ({ players }) => { ... }) // [{slot, color}]
+socket.on('ready-update',         ({ readyCount, total }) => { ... })
+socket.on('game-starting-remote', () => { showGameScreen() })
+socket.on('wave-banner',          ({ text, wave }) => { showBanner(text) })
+socket.on('remote-game-state',    (state) => { renderState(state) })
+socket.on('game-over',            ({ wave }) => { showGameOver(wave) })
+socket.on('restart-vote-remote',  ({ votes, needed }) => { ... })
+socket.on('game-restarting-remote', () => { showWaitingRoom() })
+
+// WebRTC:
+socket.on('rtc-initiate', ({ offerer, answerer }) => { ... })
+socket.on('rtc-offer',    (data) => { ... })
+socket.on('rtc-answer',   (data) => { ... })
+socket.on('rtc-ice',      (data) => { ... })
+```
+
+---
+
+## GAME STATE STRUCTURE (from `remote-game-state`)
+
+```javascript
+{
+  players: [{
+    slot,        // 1-4
+    x, y,        // position
+    angle,       // aim angle in radians
+    hp, maxHp,
+    alive,
+    connected,
+    ammo,        // -1 = Infinity
+    weapon,      // 'pistol', 'smg', etc.
+    points,
+    vx, vy,      // velocity (for client prediction)
+    canUseMysteryBox,
+    canUseVending,
+    vendingCost,
+  }],
+  zombies: [{ id, x, y, type, hp, maxHp, size, color, borderColor, vx, vy }],
+  bullets: [{ x, y, vx, vy, color, weapon }],
+  ammoPacks:   [{ x, y }],
+  healthPacks: [{ x, y }],
+  explosions:  [{ x, y, color, melee, angle }],
+  mysteryBox:     { x, y } | null,
+  vendingMachine: { x, y } | null,
+  wave,
+  gameOver,
+}
+```
+
+---
+
+## INPUT HANDLING
+
+```javascript
+// Send input at 60hz
+const inputInterval = setInterval(() => {
+  if (!localMe || !localMe.alive) return;
+  const aimAngle = Math.atan2(mouse.y - localMe.y, mouse.x - localMe.x);
+
+  // WASD or arrow keys for movement
+  let moveX = 0, moveY = 0;
+  if (keys['w'] || keys['arrowup'])    moveY = -1;
+  if (keys['s'] || keys['arrowdown'])  moveY =  1;
+  if (keys['a'] || keys['arrowleft'])  moveX = -1;
+  if (keys['d'] || keys['arrowright']) moveX =  1;
+  if (moveX && moveY) { moveX *= 0.707; moveY *= 0.707; }
+
+  // Fire only when ammo > 0
+  const fire = mouse.down && localMe.ammo !== 0;
+
+  socket.emit('pc-input', { roomCode, input: { moveX, moveY, aimAngle, fire }});
+
+  // Melee when ammo === 0 and mouse clicked
+  if (mouse.clicked && localMe.ammo === 0) {
+    socket.emit('pc-melee', { roomCode });
+    mouse.clicked = false;
+  }
+}, 16); // 60hz
+```
+
+---
+
+## CLIENT-SIDE PREDICTION (smooth movement)
+
+```javascript
+// Apply local prediction so YOUR player feels instant
+function tickLocalPlayer(localMe, keys, mouse) {
+  const SPEED = 4.2, WALL = 6, HS = 14;
+  let vx = 0, vy = 0;
+  if (keys['w']||keys['arrowup'])    vy = -SPEED;
+  if (keys['s']||keys['arrowdown'])  vy =  SPEED;
+  if (keys['a']||keys['arrowleft'])  vx = -SPEED;
+  if (keys['d']||keys['arrowright']) vx =  SPEED;
+  if (vx && vy) { vx *= 0.707; vy *= 0.707; }
+  localMe.x = Math.max(HS+WALL, Math.min(1334-HS-WALL, localMe.x + vx));
+  localMe.y = Math.max(HS+WALL, Math.min(750-HS-WALL,  localMe.y + vy));
+  localMe.angle = Math.atan2(mouse.y - localMe.y, mouse.x - localMe.x);
+}
+
+// Smooth other entities toward server position
+function getSmoothPos(key, sx, sy, svx, svy) {
+  if (!smooth[key]) { smooth[key] = {x:sx, y:sy, vx:svx||0, vy:svy||0}; return smooth[key]; }
+  const s = smooth[key];
+  const dx = sx-s.x, dy = sy-s.y;
+  const dist = Math.sqrt(dx*dx+dy*dy);
+  if (dist > 100) { s.x=sx; s.y=sy; } // hard snap for teleports
+  else { s.x += dx*0.4; s.y += dy*0.4; } // smooth blend
+  s.vx = svx||0; s.vy = svy||0;
+  return s;
+}
+```
+
+---
+
+## RENDERING — EXACT PIXEL STYLE
+
+### Player body:
+```javascript
+// Body
+ctx.fillStyle = p.color;
+ctx.fillRect(p.x-14, p.y-14, 28, 28);
+ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2;
+ctx.strokeRect(p.x-13, p.y-13, 26, 26);
+
+// Gun visual (based on weapon)
+drawGun(ctx, p, 14); // see drawGun function below
+
+// HP bar
+ctx.fillStyle='#1a0000'; ctx.fillRect(p.x-14, p.y-22, 28, 4);
+const hpPct = p.hp/p.maxHp;
+ctx.fillStyle = hpPct>0.5?'#55a049':hpPct>0.25?'#bfce72':'#883232';
+ctx.fillRect(p.x-14, p.y-22, 28*hpPct, 4);
+
+// Player label
+ctx.fillStyle='#ffffff'; ctx.font='bold 10px "Press Start 2P"';
+ctx.textAlign='center'; ctx.fillText('P'+p.slot, p.x, p.y+4);
+
+// KNIFE label when ammo=0
+if (p.ammo===0) {
+  ctx.fillStyle='#94e089'; ctx.font='6px "Press Start 2P"';
+  ctx.fillText('KNIFE', p.x, p.y-28);
+}
+```
+
+### Bullets (FLAT PIXEL SQUARES — no glow):
+```javascript
+switch(b.weapon) {
+  case 'shotgun':    ctx.fillStyle='#bfce72'; ctx.fillRect(b.x-2,b.y-2,4,4); break;
+  case 'smg':        { const a=Math.atan2(b.vy,b.vx); ctx.fillStyle='#c8a800'; ctx.translate(b.x,b.y); ctx.rotate(a); ctx.fillRect(-5,-1,10,2); } break;
+  case 'lmg':        { const a=Math.atan2(b.vy,b.vx); ctx.fillStyle='#8b5429'; ctx.translate(b.x,b.y); ctx.rotate(a); ctx.fillRect(-7,-2,14,4); } break;
+  case 'ar':         { const a=Math.atan2(b.vy,b.vx); ctx.fillStyle='#55a049'; ctx.translate(b.x,b.y); ctx.rotate(a); ctx.fillRect(-6,-1,12,3); } break;
+  case 'minigun':    ctx.fillStyle='#d14da0'; ctx.fillRect(b.x-2,b.y-2,4,4); break;
+  case 'raygun':     ctx.fillStyle='#6fcfcf'; ctx.fillRect(b.x-4,b.y-4,8,8); ctx.strokeStyle='#fff'; ctx.lineWidth=1; ctx.strokeRect(b.x-4,b.y-4,8,8); break;
+  case 'thundergun': ctx.fillStyle='#883232'; ctx.fillRect(b.x-5,b.y-5,10,10); ctx.fillStyle='#fff'; ctx.fillRect(b.x-2,b.y-2,4,4); break;
+  case 'plasma':     ctx.fillStyle='#8b3f96'; ctx.fillRect(b.x-4,b.y-4,8,8); ctx.fillStyle='#d14da0'; ctx.fillRect(b.x-2,b.y-2,4,4); break;
+  default:           ctx.fillStyle=b.color||'#fff'; ctx.fillRect(b.x-2,b.y-2,4,4);
+}
+```
+
+### drawGun function:
+```javascript
+function drawGun(ctx, p, hs) {
+  const a = p.angle, w = p.weapon || p.currentWeapon;
+  ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(a);
+  switch(w) {
+    case 'pistol':     ctx.strokeStyle='#fff';    ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(hs-2,0); ctx.lineTo(hs+12,0); ctx.stroke(); break;
+    case 'smg':        ctx.strokeStyle='#c8a800'; ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(hs-2,0); ctx.lineTo(hs+16,0); ctx.stroke(); ctx.fillStyle='#c8a800'; ctx.fillRect(hs+4,-3,6,2); break;
+    case 'shotgun':    ctx.strokeStyle='#8b5429'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(hs-2,-2); ctx.lineTo(hs+14,-2); ctx.stroke(); ctx.beginPath(); ctx.moveTo(hs-2,2); ctx.lineTo(hs+14,2); ctx.stroke(); break;
+    case 'ar':         ctx.strokeStyle='#55a049'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(hs-4,0); ctx.lineTo(hs+20,0); ctx.stroke(); ctx.fillStyle='#55a049'; ctx.fillRect(hs+8,-2,4,4); break;
+    case 'lmg':        ctx.strokeStyle='#8b5429'; ctx.lineWidth=4; ctx.beginPath(); ctx.moveTo(hs-4,0); ctx.lineTo(hs+22,0); ctx.stroke(); break;
+    case 'minigun':    ctx.strokeStyle='#d14da0'; ctx.lineWidth=2; [-3,0,3].forEach(o=>{ctx.beginPath();ctx.moveTo(hs,o);ctx.lineTo(hs+24,o);ctx.stroke();}); ctx.fillStyle='#883272'; ctx.fillRect(hs+2,-5,5,10); break;
+    case 'raygun':     ctx.strokeStyle='rgba(111,207,207,0.4)'; ctx.lineWidth=7; ctx.beginPath(); ctx.moveTo(hs,0); ctx.lineTo(hs+18,0); ctx.stroke(); ctx.strokeStyle='#6fcfcf'; ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(hs-2,0); ctx.lineTo(hs+18,0); ctx.stroke(); ctx.fillStyle='#6fcfcf'; ctx.fillRect(hs+16,-3,6,6); break;
+    case 'thundergun': ctx.strokeStyle='#883232'; ctx.lineWidth=6; ctx.beginPath(); ctx.moveTo(hs-2,0); ctx.lineTo(hs+14,0); ctx.stroke(); break;
+    case 'plasma':     ctx.strokeStyle='#8b3f96'; ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(hs-2,0); ctx.lineTo(hs+16,0); ctx.stroke(); const pulse=Math.sin(Date.now()*0.01)*2; ctx.fillStyle='#d14da0'; ctx.fillRect(hs+14-pulse/2,-pulse/2-2,4+pulse,4+pulse); break;
+    case 'chainsaw':   ctx.strokeStyle='#574200'; ctx.lineWidth=3; ctx.beginPath(); ctx.moveTo(hs-2,0); ctx.lineTo(hs+20,0); ctx.stroke(); ctx.fillStyle='#c8a800'; for(let i=0;i<4;i++){ctx.fillRect(hs+3+i*4,-4,2,4);ctx.fillRect(hs+5+i*4,0,2,4);} break;
+    default:           ctx.strokeStyle='#fff'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(hs-2,0); ctx.lineTo(hs+12,0); ctx.stroke();
+  }
+  ctx.restore();
+}
+```
+
+---
+
+## VOICE CHAT — WORKING IMPLEMENTATION
+
+This is the critical piece. Follow this EXACTLY:
+
+```javascript
+let localStream = null;
+let rtcPeers = {};
+const remoteAudios = {}; // MUST store at module scope — prevents GC killing audio
+let audioCtx = null;
+let analyserNodes = {};
+let myMuted = false;
+
+// Step 1: Initialize socket FIRST at top of script (before any functions)
+const socket = io({ transports: ['websocket'], upgrade: false });
+
+// Step 2: Request mic AFTER joining room (requires user gesture)
+async function initVoiceChat() {
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    updateMicUI(true);
+    setupVoiceAnalyser(mySlot, localStream);
+    // CRITICAL: add tracks to any peers already created
+    for (const pc of Object.values(rtcPeers)) {
+      localStream.getTracks().forEach(t => { try { pc.addTrack(t, localStream); } catch(e){} });
+    }
+  } catch(e) {
+    updateMicUI(false);
+    console.warn('Mic denied:', e);
+  }
+}
+
+// Step 3: Create peer connections
+function getOrCreatePeer(remoteSlot) {
+  if (rtcPeers[remoteSlot]) return rtcPeers[remoteSlot];
+  const pc = new RTCPeerConnection({
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+    ]
+  });
+  if (localStream) localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+  pc.onicecandidate = e => {
+    if (e.candidate) socket.emit('rtc-ice', { roomCode, to: remoteSlot, from: mySlot, candidate: e.candidate });
+  };
+  pc.ontrack = e => {
+    const stream = e.streams[0];
+    // CRITICAL: store in module-scope object, not local variable
+    if (!remoteAudios[remoteSlot]) {
+      const audio = new Audio();
+      audio.srcObject = stream;
+      audio.autoplay = true;
+      remoteAudios[remoteSlot] = audio;
+    } else {
+      remoteAudios[remoteSlot].srcObject = stream;
+    }
+    remoteAudios[remoteSlot].play().catch(() => {});
+    setupVoiceAnalyser(remoteSlot, stream);
+  };
+  rtcPeers[remoteSlot] = pc;
+  return pc;
+}
+
+// Step 4: Initiate call (offerer side)
+async function initiateCall(remoteSlot) {
+  const pc = getOrCreatePeer(remoteSlot);
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  socket.emit('rtc-offer', { roomCode, to: remoteSlot, from: mySlot, offer });
+}
+
+// Step 5: Handle incoming offer (answerer side)
+socket.on('rtc-offer', async data => {
+  const pc = getOrCreatePeer(data.from);
+  await pc.setRemoteDescription(data.offer);
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  socket.emit('rtc-answer', { roomCode, to: data.from, from: mySlot, answer });
+});
+
+socket.on('rtc-answer', async data => {
+  const pc = rtcPeers[data.from];
+  if (pc) await pc.setRemoteDescription(data.answer);
+});
+
+socket.on('rtc-ice', async data => {
+  const pc = rtcPeers[data.from];
+  if (pc && data.candidate) { try { await pc.addIceCandidate(data.candidate); } catch(e){} }
+});
+
+// Step 6: Server tells higher slot to initiate
+socket.on('rtc-initiate', async data => {
+  if (data.offerer === mySlot) await initiateCall(data.answerer);
+});
+
+// Step 7: Voice analyser for speaking indicator
+function setupVoiceAnalyser(slot, stream) {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = audioCtx.createMediaStreamSource(stream);
+    const analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 512;
+    src.connect(analyser);
+    analyserNodes[slot] = analyser;
+  } catch(e) {}
+}
+
+// Step 8: Mute toggle
+function toggleMute() {
+  myMuted = !myMuted;
+  if (localStream) localStream.getAudioTracks().forEach(t => t.enabled = !myMuted);
+  updateMicUI(!myMuted);
+}
+
+// Step 9: Speaking indicator — run at 80ms interval
+setInterval(() => {
+  if (!audioCtx || !analyserNodes[mySlot]) return;
+  const data = new Uint8Array(32);
+  analyserNodes[mySlot].getByteFrequencyData(data);
+  const vol = data.reduce((s,v) => s+v, 0) / data.length;
+  const speaking = vol > 12 && !myMuted;
+  const micBtn = document.getElementById('mic-btn');
+  if (micBtn) micBtn.classList.toggle('speaking', speaking);
+}, 80);
+```
+
+---
+
+## MIC BUTTON UI
+
+Place in bottom-right corner of game screen:
+
+```html
+<button id="mic-btn" onclick="toggleMute()">
+  <span id="mic-icon">🎤</span>
+  <span id="mic-label">MIC</span>
+</button>
+```
+
+```css
+#mic-btn {
+  position: absolute; bottom: 20px; right: 20px;
+  width: 64px; height: 64px; border-radius: 50%;
+  border: 2px solid #40318d; background: #000;
+  color: #7869c4; font-family: 'Press Start 2P'; font-size: 7px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 3px; cursor: pointer; z-index: 20; transition: all 0.1s;
+}
+#mic-btn.speaking { border-color: #55a049; color: #55a049; box-shadow: 0 0 8px #55a049; }
+#mic-btn.muted    { border-color: #883232; color: #883232; }
+```
+
+---
+
+## INVITE LINK FLOW
+
+```javascript
+// After room created or joined:
+const inviteUrl = `${window.location.origin}/game.html?room=${roomCode}`;
+
+document.getElementById('invite-btn').addEventListener('click', async () => {
+  await navigator.clipboard.writeText(inviteUrl);
+  document.getElementById('invite-btn').textContent = 'LINK COPIED!';
+  setTimeout(() => { document.getElementById('invite-btn').textContent = 'COPY INVITE LINK'; }, 2000);
+});
+
+// On page load — auto-fill room code from URL:
+const urlRoom = new URLSearchParams(window.location.search).get('room');
+if (urlRoom) {
+  document.getElementById('room-input').value = urlRoom.toUpperCase();
+  // auto-join after socket connects
+  socket.on('connect', () => { if (urlRoom) joinRoom(urlRoom); });
+}
+
+// Auto-create if ?create=1
+if (new URLSearchParams(window.location.search).get('create') === '1') {
+  socket.on('connect', () => socket.emit('create-room'));
+}
+```
+
+---
+
+## FILE STRUCTURE
+
+```
+z-team-pc/
+├── server.js              ✅ COMPLETE
+├── landing.html           ✅ COMPLETE
+├── game.html              ← YOU BUILD THIS
+├── game-constants.js      ✅ COMPLETE
+├── shared/
+│   └── game-constants.js  ✅ COMPLETE
+├── package.json           ✅ COMPLETE
+├── fly.toml               ✅ COMPLETE
+├── Dockerfile             ✅ COMPLETE
+└── fly-deploy.yml         ✅ COMPLETE (GitHub Actions auto-deploy)
+```
+
+---
+
+## DEPLOYMENT STEPS
+
+1. Create new GitHub repo: `z-team-pc`
+2. Push all files
+3. `fly launch` (or create new app on fly.io dashboard)
+4. Update `fly.toml` → set `app = "your-new-app-name"`
+5. Add `FLY_API_TOKEN` secret to GitHub repo Settings → Secrets
+6. Every push to main auto-deploys
+
+---
+
+## CRITICAL RULES FOR CLAUDE WHEN BUILDING game.html
+
+1. Initialize `socket = io({ transports: ['websocket'], upgrade: false })` at the TOP
+   of the script, before any other code
+2. Store ALL remote Audio elements in a module-scope object `remoteAudios = {}` —
+   never in local variables (they get garbage collected)
+3. Send inputs at 16ms (60hz) intervals
+4. Use FLAT PIXEL SQUARES for bullets — NO shadowBlur, NO arcs, NO glow
+5. Client-side prediction for YOUR player — apply movement locally every frame
+6. Smooth other players/zombies with 0.4 blend factor, hard snap at dist > 100
+7. `touch-action: none` ONLY on the canvas — NOT on body/html (breaks buttons)
+8. Canvas must scale to fill the browser window maintaining 1334×750 aspect ratio
+9. GAME_CONSTANTS destructuring must have fallback defaults in case file loads slowly
+10. Voice chat: call initVoiceChat() AFTER join-success, not before
